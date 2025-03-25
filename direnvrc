@@ -14,16 +14,16 @@ _BOX_DIRENV_LOG_PREFIX="box-direnv: "
 # These commands will never be replaced by their container counterparts
 _BOX_DIRENV_CMD_BLACKLIST=(
     # Coreutils
-    '[' '[[' arch b2sum base32 base64 basename basenc chcon chgrp chmod chown
-    cksum comm csplit cut date dd df dir dircolors dirname du echo expand
-    expr factor false fmt fold head hostid join md5sum nl nohup numfmt od
-    paste pathchk pr printf ptx pwd readlink realpath runcon seq sha1sum
-    sha224sum sha256sum sha384sum sha512sum shred shuf sleep sort split
+    '[' '[[' arch b2sum base32 base64 basename basenc cat chcon
+    cksum comm cp csplit cut date dd df dir dircolors dirname du echo expand
+    expr factor false fmt fold head hostid join ln ls md5sum mkdir mv nl nohup
+    numfmt od paste pathchk pr printf ptx pwd readlink realpath rm runcon seq
+    sha1sum sha224sum sha256sum sha384sum sha512sum shred shuf sleep sort split
     stdbuf stty sum tac tail tee test timeout touch tr true truncate tsort
-    tty uname unexpand uniq unlink vdir wc yes chroot
+    tty uname unexpand uniq unlink vdir wc whereis yes chroot
 
     # Tools commonly used by shell addons
-    sed awk gawk git find grep zsh
+    sed awk gawk git find grep zsh clear reset tput
 )
 
 _box_direnv_info() {
@@ -108,6 +108,8 @@ _box_direnv_preflight() {
     cat >"${layout_dir}/bin/box-direnv-dump-paths" <<-EOF
 #!/bin/bash
 set -e
+
+source /etc/profile
 
 set -f
 IFS=:
@@ -202,7 +204,7 @@ PATH=:\$PATH:
 PATH=\${PATH//:\${ldir_path}:/:}
 PATH=\${PATH#:}; PATH=\${PATH%:}
 
-exec ${exec_cmd[@]} -- bash -ic "exec \${0##*/} \\"\\\$@\\"" -- "\$@"
+exec ${exec_cmd[@]} -- bash -c "exec \${0##*/} \\"\\\$@\\"" -- "\$@"
 EOF
 
     chmod +x "${layout_dir}/bin/box-direnv-exec"
@@ -226,10 +228,6 @@ EOF
 # See https://github.com/89luca89/distrobox/blob/main/docs/usage/distrobox-assemble.md
 use_distrobox() {
     local box_name=$1 image_name
-    if [[ $# -ge 1 ]]
-    then
-        shift 1
-    fi
 
     if ! _box_direnv_preflight
     then return 1
@@ -241,18 +239,25 @@ use_distrobox() {
     if [[ -z ${box_name:-} ]]
     then
         box_name=$(_distrobox_assemble)
+    # Try local existing box
+    elif distrobox enter $box_name -- true
+    then
+        _box_direnv_info "Using existing box $box_name"
     # Try build context
     elif [[ -f $box_name/Dockerfile ]] || [[ -f $box_name/Containerfile ]]
     then
         image_name=$(_box_direnv_build_image)
+        shift 1
     # Try image pull
     elif [[ $box_name == */* ]]
     then
         image_name=$box_name
         box_name=$(echo $box_name | sed -e 's+\(/\|:\)+_+g')
+        shift 1
     # Try 'assemble' again
     else
         _distrobox_assemble
+        shift 1
     fi
 
     if ! [[ -z ${image_name:-} ]]
@@ -272,9 +277,47 @@ use_distrobox() {
 #
 # This function requires an argument.
 use_toolbox() {
+    local box_name=$1 image_name
+
     if ! _box_direnv_preflight
     then return 1
     fi
 
+    if [[ $# -lt 1 ]]
+    then
+        _box_direnv_error "'use toolbox' requires an argument."
+        exit 1
+    fi
+
     _require_cmd_version toolbox "$TOOLBOX_MIN_VERSION"
+
+    # Try local existing box
+    if toolbox run -c $box_name -- true
+    then
+        _box_direnv_info "Using existing box $box_name"
+    # Try build context
+    elif [[ -f $box_name/Dockerfile ]] || [[ -f $box_name/Containerfile ]]
+    then
+        image_name=$(_box_direnv_build_image)
+        shift 1
+    # Try image pull
+    elif [[ $box_name == */* ]]
+    then
+        image_name=$box_name
+        box_name=$(echo $box_name | sed -e 's+\(/\|:\)+_+g')
+        shift 1
+    else
+        _box_direnv_error "Could not create box '$box_name'"
+        exit 1
+    fi
+
+    if ! [[ -z ${image_name:-} ]]
+    then
+        # We need to create the toolbx
+        toolbox create $box_name -i $image_name "$@"
+    fi
+
+    backend=toolbox _box_direnv_dump_paths $box_name
+
+    export P9K_TOOLBOX_NAME=$box_name
 }
