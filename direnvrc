@@ -1,0 +1,280 @@
+# -*- mode: sh -*-
+# shellcheck shell=bash
+
+BOX_DIRENV_VERSION=0.1.0
+
+# min required versions
+BASH_MIN_VERSION=4.4
+DIRENV_MIN_VERSION=2.21.3
+DISTROBOX_MIN_VERSION=1.7.1.0
+TOOLBOX_MIN_VERSION=0.1.0
+
+_BOX_DIRENV_LOG_PREFIX="box-direnv: "
+
+# These commands will never be replaced by their container counterparts
+_BOX_DIRENV_CMD_BLACKLIST=(
+    # Coreutils
+    '[' '[[' arch b2sum base32 base64 basename basenc chcon chgrp chmod chown
+    cksum comm csplit cut date dd df dir dircolors dirname du echo expand
+    expr factor false fmt fold head hostid join md5sum nl nohup numfmt od
+    paste pathchk pr printf ptx pwd readlink realpath runcon seq sha1sum
+    sha224sum sha256sum sha384sum sha512sum shred shuf sleep sort split
+    stdbuf stty sum tac tail tee test timeout touch tr true truncate tsort
+    tty uname unexpand uniq unlink vdir wc yes chroot
+
+    # Tools commonly used by shell addons
+    sed awk gawk git find grep zsh
+)
+
+_box_direnv_info() {
+    log_status "${_BOX_DIRENV_LOG_PREFIX}$*"
+}
+
+_box_direnv_warning() {
+    if [[ -n $DIRENV_LOG_FORMAT ]]
+    then
+        local msg=$* color_normal='' color_warning=''
+        if [[ -t 2 ]]
+        then
+            color_normal="\e[m"
+            color_warning="\e[33m"
+        fi
+        # shellcheck disable=SC2059
+        printf "${color_warning}${DIRENV_LOG_FORMAT}${color_normal}\n" \
+            "${_BOX_DIRENV_LOG_PREFIX}${msg}" >&2
+    fi
+}
+
+_box_direnv_error() { log_error "${_BOX_DIRENV_LOG_PREFIX}$*"; }
+
+_box_direnv_distrobox=""
+_box_direnv_toolbox=""
+
+
+_require_version() {
+    local cmd=$1 version=$2 required=$3
+    if ! printf "%s\n" "$required" "$version" | LC_ALL=C sort -c -V 2>/dev/null
+    then
+        _box_direnv_error \
+            "minimum required $(basename "$cmd") version is $required (installed: $version)"
+        return 1
+    fi
+}
+
+_require_cmd_version() {
+    local cmd=$1 required=$2 version
+    if ! has "$cmd"
+    then _box_direnv_error "command not found: $cmd"
+        return 1
+    fi
+    version=$($cmd --version)
+    [[ $version =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]
+    _require_version "$cmd" "${BASH_REMATCH[1]}" "$required"
+}
+
+box_direnv_version() {
+    _require_version box-direnv $BOX_DIRENV_VERSION "$1"
+}
+
+_box_direnv_preflight() {
+    if [[ -z $direnv ]]
+    then
+        # shellcheck disable=2016
+        _box_direnv_error '$direnv environment variable was not defined. Was this script run inside direnv?'
+        return 1
+    fi
+
+    # check command min versions
+    if [[ -z ${BOX_DIRENV_SKIP_VERSION_CHECK:-} ]]
+    then
+        # bash check uses $BASH_VERSION with _require_version instead of
+        # _require_cmd_version because _require_cmd_version uses =~ operator which would be
+        # a syntax error on bash < 3
+        if ! _require_version bash "$BASH_VERSION" "$BASH_MIN_VERSION" ||
+            ! _require_cmd_version "$direnv" "$DIRENV_MIN_VERSION"
+        then
+            return 1
+        fi
+    fi
+
+    local layout_dir
+    layout_dir=$(direnv_layout_dir)
+
+    if [[ ! -d "$layout_dir/bin" ]]
+    then
+        mkdir -p "$layout_dir/bin"
+    fi
+
+    cat >"${layout_dir}/bin/box-direnv-dump-paths" <<-EOF
+#!/bin/bash
+set -e
+
+set -f
+IFS=:
+for p in \$PATH
+do
+    set +f
+    [ -n "\$p" ] || p=.
+    for f in "\$p"/.[!.]* "\$p"/..?* "\$p"/*
+    do
+        [ -f "\$f" ] && [ -x "\$f" ] && printf '%s\\n' "\${f##*/}"
+    done
+done
+EOF
+
+    chmod +x "${layout_dir}/bin/box-direnv-dump-paths"
+
+}
+
+
+_distrobox_assemble() {
+    local -a box_names
+    local distrobox_out
+
+    distrobox_out=$(distrobox assemble create)
+    if [[ $? != 0 ]]
+    then
+        _box_direnv_error "Failed to run 'distrobox assemble'"
+        exit 1
+    fi
+
+    box_names=$(sed -e 's+^ - Creating \(.*\)...$+\1+' <<< $distrobox_out)
+
+    echo ${box_names[0]}
+}
+
+_box_direnv_build_image() {
+    local context_dir=$1 image_name
+    local -a build_cmd
+
+    if which docker >/dev/null 2>&1
+    then
+        build_cmd=(docker build $context_dir)
+    elif which podman >/dev/null 2>&1
+    then
+        build_cmd=(podman build $context_dir)
+    else
+        _box_direnv_error "Missing 'podman' or 'docker' to build images."
+        exit 1
+    fi
+
+    image_name=$(${exec_cmd[@]})
+    if [[ $? != 0 ]]
+    then
+        _box_direnv_error "Failed to build image for box"
+        exit 1
+    fi
+}
+
+_box_direnv_dump_paths() {
+    local box_name=$1 layout_dir
+    local -a cmd_list exec_cmd
+
+    layout_dir=$(direnv_layout_dir)
+
+    if [[ $backend == distrobox ]]
+    then
+        exec_cmd=(distrobox enter --clean-path $box_name)
+    elif [[ $backend == toolbox ]]
+    then
+        exec_cmd=(toolbox run -c $box_name)
+    else
+        _box_direnv_error "Command enumerator called with no backend."
+        exit 1
+    fi
+
+    cmd_list=$(${exec_cmd[@]} -- ${layout_dir}/bin/box-direnv-dump-paths)
+    if [[ $? != 0 ]]
+    then
+        _box_direnv_error "Failed to enumerate commands in box '$box_name'"
+        exit 1
+    fi
+
+    # Reset the exported commands list
+    find "${layout_dir}/bin" -type l -delete
+
+    cat >"${layout_dir}/bin/box-direnv-exec" <<-EOF
+#!/bin/bash
+
+ldir_path=${layout_dir}/bin
+
+PATH=:\$PATH:
+PATH=\${PATH//:\${ldir_path}:/:}
+PATH=\${PATH#:}; PATH=\${PATH%:}
+
+exec ${exec_cmd[@]} -- bash -ic "exec \${0##*/} \\"\\\$@\\"" -- "\$@"
+EOF
+
+    chmod +x "${layout_dir}/bin/box-direnv-exec"
+
+    for cmd in $cmd_list
+    do
+        if ! [[ "${_BOX_DIRENV_CMD_BLACKLIST[@]}" =~ "${cmd}" ]]
+        then
+            ln -s box-direnv-exec "${layout_dir}/bin/${cmd}" 2>/dev/null
+        fi
+    done
+
+    PATH_add "${layout_dir}/bin"
+}
+
+# Takes an OCI container identifier or build context as an argument,
+# and deploys a Distrobox environment accordingly.
+#
+# If no argument is given, or the argument is a box name,
+# a 'distrobox assemble' will be attempted.
+# See https://github.com/89luca89/distrobox/blob/main/docs/usage/distrobox-assemble.md
+use_distrobox() {
+    local box_name=$1 image_name
+    if [[ $# -ge 1 ]]
+    then
+        shift 1
+    fi
+
+    if ! _box_direnv_preflight
+    then return 1
+    fi
+
+    _require_cmd_version distrobox "$DISTROBOX_MIN_VERSION"
+
+    # Try 'assemble'
+    if [[ -z ${box_name:-} ]]
+    then
+        box_name=$(_distrobox_assemble)
+    # Try build context
+    elif [[ -f $box_name/Dockerfile ]] || [[ -f $box_name/Containerfile ]]
+    then
+        image_name=$(_box_direnv_build_image)
+    # Try image pull
+    elif [[ $box_name == */* ]]
+    then
+        image_name=$box_name
+        box_name=$(echo $box_name | sed -e 's+\(/\|:\)+_+g')
+    # Try 'assemble' again
+    else
+        _distrobox_assemble
+    fi
+
+    if ! [[ -z ${image_name:-} ]]
+    then
+        # We need to create the distrobox
+        distrobox create $box_name -i $image_name "$@"
+    fi
+
+    backend=distrobox _box_direnv_dump_paths $box_name
+
+    export P9K_TOOLBOX_NAME=$box_name
+
+}
+
+# Takes an OCI container identifier or build context as an argument,
+# and deploys a Toolbx environment accordingly.
+#
+# This function requires an argument.
+use_toolbox() {
+    if ! _box_direnv_preflight
+    then return 1
+    fi
+
+    _require_cmd_version toolbox "$TOOLBOX_MIN_VERSION"
+}
