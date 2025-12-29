@@ -9,8 +9,8 @@ Heavily inspired by [nix-direnv].
 Put the following lines in your `.envrc`:
 
 ```bash
-if ! has box_direnv_version || ! box_direnv_version 0.1.0; then
-  source_url "https://raw.githubusercontent.com/thesola10/box-direnv/0.1.0/direnvrc" "sha256-pznp4/w7UzNAqreaLuGgq4/CTFjMedC376xnIWr5s+U="
+if ! has box_direnv_version || ! box_direnv_version 0.1.1; then
+  source_url "https://raw.githubusercontent.com/thesola10/box-direnv/0.1.1/direnvrc" "sha256-CsiXN7IanSkdwPX5Ejr7pUkrIMbK93hsBoLzsP9YdLs="
 fi
 ```
 

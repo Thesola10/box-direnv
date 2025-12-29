@@ -1,7 +1,7 @@
 # -*- mode: sh -*-
 # shellcheck shell=bash
 
-BOX_DIRENV_VERSION=0.1.0
+BOX_DIRENV_VERSION=0.1.1
 
 # min required versions
 BASH_MIN_VERSION=4.4
@@ -140,7 +140,7 @@ _distrobox_assemble() {
         exit 1
     fi
 
-    box_names=$(sed -e 's+^ - Creating \(.*\)...$+\1+' <<< $distrobox_out)
+    box_names=$(sed -e 's+^ - Creating \(.*\)...$+\1+;t;d' <<< $distrobox_out)
 
     echo ${box_names[0]}
 }
